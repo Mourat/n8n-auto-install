@@ -1,6 +1,7 @@
 #!/bin/bash
 
-# Скрипт для автоматической установки n8n, PostgreSQL и pgAdmin на Ubuntu 24.04
+# Скрипт для автоматической установки n8n, PostgreSQL и pgAdmin на Ubuntu 24.04 
+# с использованием Docker
 
 # Проверка прав суперпользователя
 if [ "$(id -u)" -ne 0 ]; then
@@ -20,6 +21,13 @@ echo ""
 # Данные для пользователя PostgreSQL
 DB_USER="n8n_user"
 DB_PASSWORD=$(tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 12)
+DB_NAME="n8n_data"
+PG_PASSWORD=$(tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 16)
+
+# Настройка каталогов для данных
+mkdir -p /opt/n8n_data
+mkdir -p /opt/postgres_data
+mkdir -p /opt/pgadmin_data
 
 # Подготовка системы
 echo "Обновление системы..."
@@ -29,45 +37,97 @@ apt update && apt upgrade -y
 echo "Установка необходимых пакетов..."
 apt install -y curl wget gnupg2 ca-certificates lsb-release apt-transport-https software-properties-common nginx certbot python3-certbot-nginx
 
-# Установка Node.js
-echo "Установка Node.js 18.x..."
-curl -fsSL https://deb.nodesource.com/setup_18.x | bash -
-apt install -y nodejs
+# Установка Docker и Docker Compose
+echo "Установка Docker и Docker Compose..."
+apt remove -y docker docker-engine docker.io containerd runc || true
+curl -fsSL https://get.docker.com -o get-docker.sh
+sh get-docker.sh
 
-# Установка n8n
-echo "Установка n8n..."
-npm install n8n -g
+# Убедимся, что Docker сервис запущен
+systemctl enable docker
+systemctl start docker
 
-# Установка PostgreSQL
-echo "Установка PostgreSQL..."
-apt install -y postgresql postgresql-contrib
+# Установка Docker Compose
+curl -L "https://github.com/docker/compose/releases/download/v2.20.3/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+chmod +x /usr/local/bin/docker-compose
 
-# Настройка PostgreSQL
-echo "Настройка PostgreSQL..."
-sudo -u postgres psql -c "CREATE USER $DB_USER WITH PASSWORD '$DB_PASSWORD';"
-sudo -u postgres psql -c "CREATE DATABASE n8n_data OWNER $DB_USER;"
-sudo -u postgres psql -c "GRANT ALL PRIVILEGES ON DATABASE n8n_data TO $DB_USER;"
+# Создаем docker-compose.yml файл
+echo "Создание docker-compose.yml..."
+cat > /opt/docker-compose.yml << EOF
+version: '3.8'
 
-# Установка векторного плагина для PostgreSQL
-echo "Установка векторного плагина для PostgreSQL..."
-apt install -y postgresql-14-pgvector || apt install -y postgresql-15-pgvector || apt install -y postgresql-16-pgvector
+services:
+  n8n:
+    image: n8nio/n8n
+    restart: always
+    ports:
+      - "5678:5678"
+    environment:
+      - N8N_HOST=\${DOMAIN}
+      - N8N_PROTOCOL=https
+      - N8N_PORT=443
+      - NODE_ENV=production
+      - N8N_ENCRYPTION_KEY=$(tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 24)
+      - WEBHOOK_URL=https://\${DOMAIN}/
+    volumes:
+      - /opt/n8n_data:/home/node/.n8n
+    networks:
+      - n8n_network
+    depends_on:
+      - postgres
 
-# Активация векторного расширения
-sudo -u postgres psql -d n8n_data -c "CREATE EXTENSION IF NOT EXISTS vector;"
+  postgres:
+    image: postgis/postgis:16-3.4
+    restart: always
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=\${PG_PASSWORD}
+      - POSTGRES_DB=postgres
+    volumes:
+      - /opt/postgres_data:/var/lib/postgresql/data
+    networks:
+      - n8n_network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
-# Установка pgAdmin4
-echo "Установка pgAdmin4..."
-curl -fsSL https://www.pgadmin.org/static/packages_pgadmin_org.pub | sudo gpg --dearmor -o /etc/apt/trusted.gpg.d/pgadmin.gpg
-echo "deb [signed-by=/etc/apt/trusted.gpg.d/pgadmin.gpg] https://ftp.postgresql.org/pub/pgadmin/pgadmin4/apt/$(lsb_release -cs) pgadmin4 main" > /etc/apt/sources.list.d/pgadmin4.list
-apt update
-apt install -y pgadmin4-web
+  pgadmin:
+    image: dpage/pgadmin4
+    restart: always
+    environment:
+      - PGADMIN_DEFAULT_EMAIL=\${PGADMIN_EMAIL}
+      - PGADMIN_DEFAULT_PASSWORD=\${PGADMIN_PASSWORD}
+      - PGADMIN_CONFIG_ENHANCED_COOKIE_PROTECTION=True
+      - PGADMIN_CONFIG_LOGIN_BANNER="Authorized users only!"
+      - PGADMIN_CONFIG_CONSOLE_LOG_LEVEL=10
+    volumes:
+      - /opt/pgadmin_data:/var/lib/pgadmin
+    ports:
+      - "5050:80"
+    networks:
+      - n8n_network
+    depends_on:
+      - postgres
 
-# Настройка pgAdmin4
-echo "Настройка pgAdmin4..."
-echo "yes" | /usr/pgadmin4/bin/setup-web.sh --email $PGADMIN_EMAIL --password $PGADMIN_PASSWORD
+networks:
+  n8n_network:
+    driver: bridge
+EOF
+
+# Создание .env файла для docker-compose
+cat > /opt/.env << EOF
+DOMAIN=$DOMAIN
+PGADMIN_EMAIL=$PGADMIN_EMAIL
+PGADMIN_PASSWORD=$PGADMIN_PASSWORD
+PG_PASSWORD=$PG_PASSWORD
+DB_USER=$DB_USER
+DB_PASSWORD=$DB_PASSWORD
+EOF
 
 # Настройка Nginx для n8n
-echo "Настройка Nginx для n8n..."
+echo "Настройка Nginx для n8n и pgAdmin..."
 cat > /etc/nginx/sites-available/$DOMAIN.conf << EOF
 server {
     listen 80;
@@ -79,6 +139,9 @@ server {
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
     }
 
     location /pgadmin/ {
@@ -93,43 +156,57 @@ server {
 EOF
 
 # Активация конфигурации Nginx
-ln -s /etc/nginx/sites-available/$DOMAIN.conf /etc/nginx/sites-enabled/
+ln -sf /etc/nginx/sites-available/$DOMAIN.conf /etc/nginx/sites-enabled/
 rm -f /etc/nginx/sites-enabled/default
 nginx -t && systemctl restart nginx
-
-# Настройка pgAdmin конфигурации
-cat > /etc/pgadmin4/pgadmin4_web.conf << EOF
-import os
-SERVER_MODE = True
-SCRIPT_NAME = '/pgadmin'
-EOF
-systemctl restart apache2
 
 # Получение SSL-сертификата
 echo "Получение SSL-сертификата..."
 certbot --nginx -d $DOMAIN --non-interactive --agree-tos --email $EMAIL
 
-# Создание systemd сервиса для n8n
-echo "Создание systemd сервиса для n8n..."
-cat > /etc/systemd/system/n8n.service << EOF
+# Запуск Docker Compose
+echo "Запуск контейнеров..."
+cd /opt/
+docker-compose -f docker-compose.yml --env-file .env up -d
+
+# Ожидание запуска контейнеров
+sleep 10
+
+# Создание пользователя и базы данных
+echo "Настройка базы данных PostgreSQL..."
+docker exec -i $(docker ps -qf "name=postgres") psql -U postgres << EOF
+CREATE USER $DB_USER WITH PASSWORD '$DB_PASSWORD';
+CREATE DATABASE $DB_NAME OWNER $DB_USER;
+GRANT ALL PRIVILEGES ON DATABASE $DB_NAME TO $DB_USER;
+\c $DB_NAME
+CREATE EXTENSION IF NOT EXISTS vector;
+EOF
+
+echo "Установка векторного расширения..."
+docker exec -i $(docker ps -qf "name=postgres") psql -U postgres -d $DB_NAME -c "CREATE EXTENSION IF NOT EXISTS vector;"
+
+# Настройка автозапуска
+echo "Настройка автозапуска Docker Compose при загрузке системы..."
+cat > /etc/systemd/system/docker-compose-n8n.service << EOF
 [Unit]
-Description=n8n
-After=network.target
+Description=Docker Compose Application Service for n8n
+Requires=docker.service
+After=docker.service
 
 [Service]
-Type=simple
-User=root
-ExecStart=/usr/bin/n8n start
-Restart=on-failure
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/opt
+ExecStart=/usr/local/bin/docker-compose --env-file .env up -d
+ExecStop=/usr/local/bin/docker-compose down
+TimeoutStartSec=0
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
-# Активация и запуск n8n
 systemctl daemon-reload
-systemctl enable n8n
-systemctl start n8n
+systemctl enable docker-compose-n8n.service
 
 # Вывод информации для пользователя
 echo "============================================"
@@ -139,11 +216,13 @@ echo "n8n доступен по адресу: https://$DOMAIN"
 echo "pgAdmin доступен по адресу: https://$DOMAIN/pgadmin"
 echo ""
 echo "Данные для подключения к PostgreSQL:"
-echo "Хост: localhost"
+echo "Хост: postgres (или IP-адрес сервера для внешнего подключения)"
 echo "Порт: 5432"
-echo "База данных: n8n_data"
+echo "База данных: $DB_NAME"
 echo "Пользователь: $DB_USER"
 echo "Пароль: $DB_PASSWORD"
+echo "Суперпользователь postgres: postgres"
+echo "Пароль для postgres: $PG_PASSWORD"
 echo ""
 echo "Данные для входа в pgAdmin:"
 echo "Email: $PGADMIN_EMAIL"
@@ -162,15 +241,27 @@ n8n доступен по адресу: https://$DOMAIN
 pgAdmin доступен по адресу: https://$DOMAIN/pgadmin
 
 Данные для подключения к PostgreSQL:
-Хост: localhost
+Хост: postgres (внутри Docker), localhost (с сервера)
 Порт: 5432
-База данных: n8n_data
+База данных: $DB_NAME
 Пользователь: $DB_USER
 Пароль: $DB_PASSWORD
+
+Суперпользователь базы данных:
+Пользователь: postgres
+Пароль: $PG_PASSWORD
 
 Данные для входа в pgAdmin:
 Email: $PGADMIN_EMAIL
 Пароль: $PGADMIN_PASSWORD
+
+Директории данных:
+n8n: /opt/n8n_data
+PostgreSQL: /opt/postgres_data
+pgAdmin: /opt/pgadmin_data
+
+Docker Compose файл: /opt/docker-compose.yml
+Переменные окружения: /opt/.env
 ================================================
 EOF
 
