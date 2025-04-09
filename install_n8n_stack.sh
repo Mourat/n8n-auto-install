@@ -196,3 +196,4 @@ echo "🔐 Доступ к pgAdmin:"
 echo "  Логин: ${PGADMIN_USER}"
 echo "  Пароль: ${PGADMIN_PASSWORD}"
 echo
+
