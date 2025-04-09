@@ -2,17 +2,35 @@
 
 set -e
 
-# Запрос переменных
+GREEN='\033[0;32m'
+NC='\033[0m' # No Color
+
+log_step() {
+  echo -e "\n${GREEN}==> $1...${NC}"
+}
+
+# ========================
+# Ввод данных
+# ========================
+log_step "🔧 Запрос параметров"
+
 read -p "Введите домен для n8n и pgAdmin (например: example.com): " DOMAIN
 read -p "Введите email для Let's Encrypt: " EMAIL
 read -p "Введите логин для pgAdmin: " PGADMIN_USER
 read -s -p "Введите пароль для pgAdmin: " PGADMIN_PASSWORD
 echo
 
-# Создание папки проекта
+# ========================
+# Создание структуры
+# ========================
+log_step "📁 Создание проекта и структуры каталогов"
 mkdir -p ~/n8n-docker && cd ~/n8n-docker
+mkdir -p certbot/www certbot/conf
 
-# Создание docker-compose.yml
+# ========================
+# docker-compose.yml
+# ========================
+log_step "📝 Создание docker-compose.yml"
 cat > docker-compose.yml <<EOF
 version: "3.8"
 
@@ -74,7 +92,10 @@ services:
     entrypoint: "/bin/sh -c 'trap exit TERM; while :; do sleep 1; done'"
 EOF
 
-# Создание nginx конфигурации
+# ========================
+# nginx.conf
+# ========================
+log_step "📝 Создание nginx.conf"
 cat > nginx.conf <<EOF
 events {}
 
@@ -118,29 +139,60 @@ http {
 }
 EOF
 
-# Установка Docker и Docker Compose (если ещё не установлены)
+# ========================
+# Docker и Compose
+# ========================
+log_step "🐳 Проверка установки Docker и Docker Compose"
+
 if ! command -v docker &> /dev/null; then
-  echo "Установка Docker..."
+  log_step "Установка Docker..."
   sudo apt update && sudo apt install -y docker.io
   sudo systemctl enable docker --now
 fi
 
 if ! command -v docker-compose &> /dev/null; then
-  echo "Установка Docker Compose..."
+  log_step "Установка Docker Compose..."
   sudo apt install -y docker-compose
 fi
 
-# Создание папок
-mkdir -p certbot/www certbot/conf
-
+# ========================
 # Получение SSL-сертификата
+# ========================
+log_step "🔐 Получение SSL-сертификата с помощью certbot"
 docker-compose run --rm certbot certonly \
   --webroot --webroot-path=/var/www/certbot \
   --email ${EMAIL} --agree-tos --no-eff-email \
   -d ${DOMAIN}
 
-# Запуск всех сервисов
+# ========================
+# Запуск контейнеров
+# ========================
+log_step "🚀 Запуск всех контейнеров"
 docker-compose up -d
 
-# Установка расширения pgvector в PostgreSQL
-docker exec -i $(docker-compose ps -q postgres) psql -U project_user -d projects_db -c
+# ========================
+# Установка pgvector
+# ========================
+log_step "🧠 Установка расширения pgvector в PostgreSQL"
+sleep 5
+docker exec -i $(docker-compose ps -q postgres) psql -U project_user -d projects_db -c "CREATE EXTENSION IF NOT EXISTS vector;"
+
+# ========================
+# Вывод итоговой информации
+# ========================
+log_step "✅ Установка завершена!"
+
+echo
+echo "🌐 n8n доступен: https://${DOMAIN}/"
+echo "🌐 pgAdmin доступен: https://${DOMAIN}/pgadmin"
+echo
+echo "🔑 PostgreSQL:"
+echo "  Хост: postgres (внутри docker-сети)"
+echo "  БД: projects_db"
+echo "  Пользователь: project_user"
+echo "  Пароль: project_pass"
+echo
+echo "🔐 Доступ к pgAdmin:"
+echo "  Логин: ${PGADMIN_USER}"
+echo "  Пароль: ${PGADMIN_PASSWORD}"
+echo
