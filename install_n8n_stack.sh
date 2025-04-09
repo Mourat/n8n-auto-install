@@ -1,182 +1,178 @@
 #!/bin/bash
 
-set -e
+# Скрипт для автоматической установки n8n, PostgreSQL и pgAdmin на Ubuntu 24.04
 
-GREEN='\033[0;32m'
-NC='\033[0m'
+# Проверка прав суперпользователя
+if [ "$(id -u)" -ne 0 ]; then
+   echo "Этот скрипт должен быть запущен от имени root" 
+   exit 1
+fi
 
-log_step() {
-  echo -e "\n${GREEN}==> $1...${NC}"
-}
+# Запрос данных у пользователя
+read -p "Введите имя домена (например, example.com): " DOMAIN
+read -p "Введите email для SSL-сертификата: " EMAIL
 
-# ==== Ввод данных ====
-log_step "🔧 Запрос параметров"
-read -p "Введите домен для n8n и pgAdmin (например: example.com): " DOMAIN
-read -p "Введите email для Let's Encrypt: " EMAIL
-read -p "Введите логин для pgAdmin: " PGADMIN_USER
-read -s -p "Введите пароль для pgAdmin: " PGADMIN_PASSWORD
-echo
+# Данные для pgAdmin
+read -p "Введите email для входа в pgAdmin: " PGADMIN_EMAIL
+read -s -p "Введите пароль для входа в pgAdmin: " PGADMIN_PASSWORD
+echo ""
 
-mkdir -p ~/n8n-docker && cd ~/n8n-docker
-mkdir -p certbot/www certbot/conf
+# Данные для пользователя PostgreSQL
+DB_USER="n8n_user"
+DB_PASSWORD=$(tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 12)
 
-# ==== docker-compose.yml ====
-log_step "📝 Создание docker-compose.yml"
-cat > docker-compose.yml <<EOF
-version: "3.8"
+# Подготовка системы
+echo "Обновление системы..."
+apt update && apt upgrade -y
 
-services:
-  n8n:
-    image: n8nio/n8n
-    restart: always
-    environment:
-      WEBHOOK_URL: "https://${DOMAIN}/"
-      N8N_HOST: "${DOMAIN}"
-      N8N_PORT: 5678
-      N8N_PROTOCOL: "https"
-    ports:
-      - "5678:5678"
-    volumes:
-      - ./n8n_data:/home/node/.n8n
+# Установка необходимых пакетов
+echo "Установка необходимых пакетов..."
+apt install -y curl wget gnupg2 ca-certificates lsb-release apt-transport-https software-properties-common nginx certbot python3-certbot-nginx
 
-  postgres:
-    image: postgres:15
-    restart: always
-    environment:
-      POSTGRES_USER: project_user
-      POSTGRES_PASSWORD: project_pass
-      POSTGRES_DB: projects_db
-    volumes:
-      - ./postgres_data:/var/lib/postgresql/data
-    command: postgres -c 'shared_preload_libraries=pgvector'
+# Установка Node.js
+echo "Установка Node.js 18.x..."
+curl -fsSL https://deb.nodesource.com/setup_18.x | bash -
+apt install -y nodejs
 
-  pgadmin:
-    image: dpage/pgadmin4
-    restart: always
-    environment:
-      PGADMIN_DEFAULT_EMAIL: "${PGADMIN_USER}"
-      PGADMIN_DEFAULT_PASSWORD: "${PGADMIN_PASSWORD}"
-    volumes:
-      - ./pgadmin_data:/var/lib/pgadmin
-    depends_on:
-      - postgres
+# Установка n8n
+echo "Установка n8n..."
+npm install n8n -g
 
-  nginx:
-    image: nginx:latest
-    restart: always
-    ports:
-      - "80:80"
-      - "443:443"
-    volumes:
-      - ./nginx.conf:/etc/nginx/nginx.conf:ro
-      - ./certbot/www:/var/www/certbot
-      - ./certbot/conf:/etc/letsencrypt
-    depends_on:
-      - n8n
-      - pgadmin
+# Установка PostgreSQL
+echo "Установка PostgreSQL..."
+apt install -y postgresql postgresql-contrib
 
-  certbot:
-    image: certbot/certbot
-    volumes:
-      - ./certbot/www:/var/www/certbot
-      - ./certbot/conf:/etc/letsencrypt
-    entrypoint: "/bin/sh -c 'trap exit TERM; while :; do sleep 1; done'"
-EOF
+# Настройка PostgreSQL
+echo "Настройка PostgreSQL..."
+sudo -u postgres psql -c "CREATE USER $DB_USER WITH PASSWORD '$DB_PASSWORD';"
+sudo -u postgres psql -c "CREATE DATABASE n8n_data OWNER $DB_USER;"
+sudo -u postgres psql -c "GRANT ALL PRIVILEGES ON DATABASE n8n_data TO $DB_USER;"
 
-# ==== nginx.conf ====
-log_step "📝 Создание nginx.conf"
-cat > nginx.conf <<EOF
-events {}
+# Установка векторного плагина для PostgreSQL
+echo "Установка векторного плагина для PostgreSQL..."
+apt install -y postgresql-14-pgvector || apt install -y postgresql-15-pgvector || apt install -y postgresql-16-pgvector
 
-http {
-    server {
-        listen 80;
-        server_name ${DOMAIN};
+# Активация векторного расширения
+sudo -u postgres psql -d n8n_data -c "CREATE EXTENSION IF NOT EXISTS vector;"
 
-        location /.well-known/acme-challenge/ {
-            root /var/www/certbot;
-        }
+# Установка pgAdmin4
+echo "Установка pgAdmin4..."
+curl -fsSL https://www.pgadmin.org/static/packages_pgadmin_org.pub | sudo gpg --dearmor -o /etc/apt/trusted.gpg.d/pgadmin.gpg
+echo "deb [signed-by=/etc/apt/trusted.gpg.d/pgadmin.gpg] https://ftp.postgresql.org/pub/pgadmin/pgadmin4/apt/$(lsb_release -cs) pgadmin4 main" > /etc/apt/sources.list.d/pgadmin4.list
+apt update
+apt install -y pgadmin4-web
 
-        location / {
-            return 301 https://\$host\$request_uri;
-        }
+# Настройка pgAdmin4
+echo "Настройка pgAdmin4..."
+echo "yes" | /usr/pgadmin4/bin/setup-web.sh --email $PGADMIN_EMAIL --password $PGADMIN_PASSWORD
+
+# Настройка Nginx для n8n
+echo "Настройка Nginx для n8n..."
+cat > /etc/nginx/sites-available/$DOMAIN.conf << EOF
+server {
+    listen 80;
+    server_name $DOMAIN;
+
+    location / {
+        proxy_pass http://localhost:5678;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
     }
 
-    server {
-        listen 443 ssl;
-        server_name ${DOMAIN};
-
-        ssl_certificate /etc/letsencrypt/live/${DOMAIN}/fullchain.pem;
-        ssl_certificate_key /etc/letsencrypt/live/${DOMAIN}/privkey.pem;
-
-        location / {
-            proxy_pass http://n8n:5678;
-            proxy_set_header Host \$host;
-            proxy_set_header X-Real-IP \$remote_addr;
-            proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-            proxy_set_header X-Forwarded-Proto \$scheme;
-        }
-
-        location /pgadmin/ {
-            proxy_pass http://pgadmin:80/;
-            proxy_set_header Host \$host;
-            proxy_set_header X-Real-IP \$remote_addr;
-            proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-            proxy_set_header X-Forwarded-Proto \$scheme;
-        }
+    location /pgadmin/ {
+        proxy_pass http://localhost:5050/;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_set_header X-Script-Name /pgadmin;
     }
 }
 EOF
 
-# ==== Установка Docker ====
-log_step "🐳 Установка Docker и Compose (если не установлены)"
-if ! command -v docker &> /dev/null; then
-  sudo apt update && sudo apt install -y docker.io
-  sudo systemctl enable docker --now
-fi
-if ! command -v docker-compose &> /dev/null; then
-  sudo apt install -y docker-compose
-fi
+# Активация конфигурации Nginx
+ln -s /etc/nginx/sites-available/$DOMAIN.conf /etc/nginx/sites-enabled/
+rm -f /etc/nginx/sites-enabled/default
+nginx -t && systemctl restart nginx
 
-# ==== Запуск nginx для выдачи сертификата ====
-log_step "🌀 Временный запуск nginx"
-docker-compose up -d nginx
+# Настройка pgAdmin конфигурации
+cat > /etc/pgadmin4/pgadmin4_web.conf << EOF
+import os
+SERVER_MODE = True
+SCRIPT_NAME = '/pgadmin'
+EOF
+systemctl restart apache2
 
-log_step "📡 Проверка доступа к .well-known"
-sleep 3
-curl -s --max-time 2 http://${DOMAIN}/.well-known/acme-challenge/test || echo "Проверка пройдена (404 — это нормально)"
+# Получение SSL-сертификата
+echo "Получение SSL-сертификата..."
+certbot --nginx -d $DOMAIN --non-interactive --agree-tos --email $EMAIL
 
-# ==== Получение сертификата ====
-log_step "🔐 Получение SSL-сертификата"
-docker-compose run --rm certbot certonly \
-  --webroot --webroot-path=/var/www/certbot \
-  --email ${EMAIL} --agree-tos --no-eff-email \
-  -d ${DOMAIN}
+# Создание systemd сервиса для n8n
+echo "Создание systemd сервиса для n8n..."
+cat > /etc/systemd/system/n8n.service << EOF
+[Unit]
+Description=n8n
+After=network.target
 
-# ==== Перезапуск всех контейнеров ====
-log_step "♻️ Перезапуск сервисов с SSL"
-docker-compose down
-docker-compose up -d
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/bin/n8n start
+Restart=on-failure
 
-# ==== Установка pgvector ====
-log_step "🧠 Установка расширения pgvector"
-sleep 5
-docker exec -i $(docker-compose ps -q postgres) psql -U project_user -d projects_db -c "CREATE EXTENSION IF NOT EXISTS vector;"
+[Install]
+WantedBy=multi-user.target
+EOF
 
-# ==== Вывод финальной информации ====
-log_step "✅ Установка завершена!"
+# Активация и запуск n8n
+systemctl daemon-reload
+systemctl enable n8n
+systemctl start n8n
 
-echo
-echo "🌐 n8n доступен: https://${DOMAIN}/"
-echo "🌐 pgAdmin доступен: https://${DOMAIN}/pgadmin"
-echo
-echo "🔑 PostgreSQL:"
-echo "  Хост: postgres (внутри docker-сети)"
-echo "  БД: projects_db"
-echo "  Пользователь: project_user"
-echo "  Пароль: project_pass"
-echo
-echo "🔐 Доступ к pgAdmin:"
-echo "  Логин: ${PGADMIN_USER}"
-echo "  Пароль: ${PGADMIN_PASSWORD}"
-echo
+# Вывод информации для пользователя
+echo "============================================"
+echo "Установка успешно завершена!"
+echo "============================================"
+echo "n8n доступен по адресу: https://$DOMAIN"
+echo "pgAdmin доступен по адресу: https://$DOMAIN/pgadmin"
+echo ""
+echo "Данные для подключения к PostgreSQL:"
+echo "Хост: localhost"
+echo "Порт: 5432"
+echo "База данных: n8n_data"
+echo "Пользователь: $DB_USER"
+echo "Пароль: $DB_PASSWORD"
+echo ""
+echo "Данные для входа в pgAdmin:"
+echo "Email: $PGADMIN_EMAIL"
+echo "Пароль: $PGADMIN_PASSWORD"
+echo "============================================"
+echo "Для входа в n8n необходимо создать аккаунт при первом посещении."
+echo "============================================"
+
+# Сохранение данных в файл для дальнейшего использования
+cat > ~/n8n_install_info.txt << EOF
+=========== ИНФОРМАЦИЯ ОБ УСТАНОВКЕ N8N ==========
+Дата установки: $(date)
+Домен: $DOMAIN
+
+n8n доступен по адресу: https://$DOMAIN
+pgAdmin доступен по адресу: https://$DOMAIN/pgadmin
+
+Данные для подключения к PostgreSQL:
+Хост: localhost
+Порт: 5432
+База данных: n8n_data
+Пользователь: $DB_USER
+Пароль: $DB_PASSWORD
+
+Данные для входа в pgAdmin:
+Email: $PGADMIN_EMAIL
+Пароль: $PGADMIN_PASSWORD
+================================================
+EOF
+
+chmod 600 ~/n8n_install_info.txt
+echo "Данные для доступа также сохранены в файле ~/n8n_install_info.txt"
