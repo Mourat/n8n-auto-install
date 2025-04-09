@@ -21,10 +21,10 @@ services:
     image: n8nio/n8n
     restart: always
     environment:
-      - WEBHOOK_URL=https://${DOMAIN}/
-      - N8N_HOST=${DOMAIN}
-      - N8N_PORT=5678
-      - N8N_PROTOCOL=https
+      WEBHOOK_URL: "https://${DOMAIN}/"
+      N8N_HOST: "${DOMAIN}"
+      N8N_PORT: 5678
+      N8N_PROTOCOL: "https"
     ports:
       - "5678:5678"
     volumes:
@@ -34,9 +34,9 @@ services:
     image: postgres:15
     restart: always
     environment:
-      POSTGRES_USER=project_user
-      POSTGRES_PASSWORD=project_pass
-      POSTGRES_DB=projects_db
+      POSTGRES_USER: project_user
+      POSTGRES_PASSWORD: project_pass
+      POSTGRES_DB: projects_db
     volumes:
       - ./postgres_data:/var/lib/postgresql/data
     command: postgres -c 'shared_preload_libraries=pgvector'
@@ -45,8 +45,8 @@ services:
     image: dpage/pgadmin4
     restart: always
     environment:
-      PGADMIN_DEFAULT_EMAIL=${PGADMIN_USER}
-      PGADMIN_DEFAULT_PASSWORD=${PGADMIN_PASSWORD}
+      PGADMIN_DEFAULT_EMAIL: "${PGADMIN_USER}"
+      PGADMIN_DEFAULT_PASSWORD: "${PGADMIN_PASSWORD}"
     volumes:
       - ./pgadmin_data:/var/lib/pgadmin
     depends_on:
@@ -142,23 +142,5 @@ docker-compose run --rm certbot certonly \
 # Запуск всех сервисов
 docker-compose up -d
 
-# Установка pgvector в PostgreSQL
-docker exec -i $(docker-compose ps -q postgres) psql -U project_user -d projects_db -c "CREATE EXTENSION IF NOT EXISTS vector;"
-
-# Вывод информации
-echo
-echo "✅ Установка завершена!"
-echo
-echo "🌐 n8n доступен: https://${DOMAIN}/"
-echo "🌐 pgAdmin доступен: https://${DOMAIN}/pgadmin"
-echo
-echo "🔑 PostgreSQL:"
-echo "  Хост: postgres"
-echo "  БД: projects_db"
-echo "  Пользователь: project_user"
-echo "  Пароль: project_pass"
-echo
-echo "🔐 Доступ к pgAdmin:"
-echo "  Логин: ${PGADMIN_USER}"
-echo "  Пароль: ${PGADMIN_PASSWORD}"
-echo
+# Установка расширения pgvector в PostgreSQL
+docker exec -i $(docker-compose ps -q postgres) psql -U project_user -d projects_db -c
