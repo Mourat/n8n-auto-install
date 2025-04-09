@@ -88,6 +88,9 @@ sudo -u postgres psql <<EOF
 CREATE DATABASE n8n_data;
 CREATE USER n8nuser WITH PASSWORD 'n8npass';
 GRANT ALL PRIVILEGES ON DATABASE n8n_data TO n8nuser;
+\c n8n_data
+GRANT ALL ON SCHEMA public TO n8nuser;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO n8nuser;
 EOF
 
 sudo sed -i "s/^#listen_addresses = .*/listen_addresses = 'localhost'/" /etc/postgresql/*/main/postgresql.conf
