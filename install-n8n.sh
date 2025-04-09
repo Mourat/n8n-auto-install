@@ -57,7 +57,7 @@ sudo systemctl daemon-reload
 sudo systemctl enable n8n
 sudo systemctl start n8n
 
-echo "🌐 Настройка nginx..."
+echo "🌐 Настройка nginx (n8n)..."
 sudo tee /etc/nginx/sites-available/n8n > /dev/null <<EOF
 server {
     listen 80;
@@ -74,6 +74,15 @@ server {
         proxy_set_header X-Forwarded-Proto \$scheme;
         proxy_cache_bypass \$http_upgrade;
     }
+
+    location /pgadmin/ {
+        proxy_pass http://localhost:5050/;
+        proxy_set_header X-Script-Name /pgadmin;
+        proxy_set_header X-Scheme https;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+    }
 }
 EOF
 
@@ -88,22 +97,30 @@ sudo -u postgres psql <<EOF
 CREATE DATABASE n8n_data;
 CREATE USER n8nuser WITH PASSWORD 'n8npass';
 GRANT ALL PRIVILEGES ON DATABASE n8n_data TO n8nuser;
-\c n8n_data
 GRANT ALL ON SCHEMA public TO n8nuser;
-ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO n8nuser;
 EOF
 
 sudo sed -i "s/^#listen_addresses = .*/listen_addresses = 'localhost'/" /etc/postgresql/*/main/postgresql.conf
 sudo systemctl restart postgresql
 
+echo "🧠 Установка pgAdmin 4 (веб)..."
+curl https://www.pgadmin.org/static/packages_pgadmin_org.pub | sudo gpg --dearmor -o /usr/share/keyrings/packages-pgadmin-org.gpg
+sudo sh -c 'echo "deb [signed-by=/usr/share/keyrings/packages-pgadmin-org.gpg] https://ftp.postgresql.org/pub/pgadmin/pgadmin4/apt/$(lsb_release -cs) pgadmin4 main" > /etc/apt/sources.list.d/pgadmin4.list'
+sudo apt update
+sudo apt install -y pgadmin4-web
+
+echo "⚙️ Настройка pgAdmin — введи email и пароль для входа в интерфейс:"
+sudo /usr/pgadmin4/bin/setup-web.sh --yes --port 5050
+
 echo
 echo "✅ Установка завершена!"
-echo "🔗 Открой n8n в браузере: https://$DOMAIN"
+echo "🔗 Панель n8n:         https://$DOMAIN"
+echo "🗄  Данные PostgreSQL:"
+echo "     Хост:     localhost"
+echo "     Порт:     5432"
+echo "     База:     n8n_data"
+echo "     Пользователь: n8nuser"
+echo "     Пароль:   n8npass"
 echo
-echo "📦 Данные PostgreSQL для workflow:"
-echo "  Хост: localhost"
-echo "  Порт: 5432"
-echo "  База: n8n_data"
-echo "  Пользователь: n8nuser"
-echo "  Пароль: n8npass"
-
+echo "🧩 Интерфейс pgAdmin: https://$DOMAIN/pgadmin"
+echo "     (используй email/пароль, введённые при настройке)"
